@@ -194,14 +194,24 @@ openclaw lingzhu info
 
 ## Changelog
 
-### v1.1.0 (2026-03-08)
+See [CHANGELOG.md](./CHANGELOG.md) for full history.
 
-Fixed (relative to original [r-wmi](https://clawhub.ai/EndlessJour9527/r-wmi)):
+### v1.1.1 (2026-03-08)
+
+- SSE heartbeat keepalive (12s interval) to prevent Lingzhu platform timeout
+- User message fallback to avoid 400 errors on unexpected request formats
+
+### v1.1.0 (2026-03-08)
 
 - `registerHttpHandler` → `registerHttpRoute` API compatibility (OpenClaw 2026.3.x)
 - Session persistence: fixed session key for multi-turn conversation context
 - Agent routing: `x-openclaw-agent-id` + `x-openclaw-session-key` headers for precise routing
 - Configurable `agentId` via plugin config
+
+### Known Limitations
+
+- Lingzhu platform SSE timeout is ~30-60s. Complex tasks (research reports, multi-tool workflows) may still timeout on the glasses side — use Telegram for those.
+- SSE comment heartbeats may not be recognized by all Lingzhu platform versions.
 
 ## Credits
 
