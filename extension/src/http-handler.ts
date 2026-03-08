@@ -76,6 +76,8 @@ export function createHttpHandler(api: any, getConfig: () => LingzhuConfig) {
       return true;
     }
 
+    let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+
     try {
       // 解析请求体
       const body = await readJsonBody(req) as LingzhuRequest | undefined;
@@ -91,7 +93,7 @@ export function createHttpHandler(api: any, getConfig: () => LingzhuConfig) {
       }
 
       logger.info(
-        `[Lingzhu] Request: message_id=${body.message_id}, agent_id=${body.agent_id}`
+        `[Lingzhu] Request: message_id=${body.message_id}, agent_id=${body.agent_id}, message=${JSON.stringify(body.message)}`
       );
 
       // 设置 SSE 响应头
@@ -105,6 +107,23 @@ export function createHttpHandler(api: any, getConfig: () => LingzhuConfig) {
         body.message,
         body.metadata?.context
       );
+
+      // 兜底：如果转换后没有 user message，尝试从原始消息中提取文本
+      const hasUserMsg = openaiMessages.some((m) => m.role === "user");
+      if (!hasUserMsg) {
+        // 尝试从 body.message 中提取任何文本内容
+        const fallbackText = body.message
+          .map((m: any) => m.text || m.content || "")
+          .filter(Boolean)
+          .join(" ");
+        if (fallbackText) {
+          openaiMessages.push({ role: "user", content: fallbackText });
+        } else {
+          // 最后兜底：用 "你好" 避免 400 错误
+          openaiMessages.push({ role: "user", content: "你好" });
+        }
+        logger.warn(`[Lingzhu] No user message after transform, fallback: ${fallbackText || "你好"}`);
+      }
 
       // 使用固定 session key，让所有灵珠请求共享同一个 agent session（保持上下文）
       const sessionKey = `lingzhu:${config.agentId || "luna"}:default`;
@@ -148,6 +167,23 @@ export function createHttpHandler(api: any, getConfig: () => LingzhuConfig) {
       // 收集完整响应用于提取 follow_up
       let fullResponse = "";
       let hasToolCall = false;
+      let lastDataTime = Date.now();
+      const HEARTBEAT_INTERVAL = 12000; // 12秒发一次心跳
+
+      // 心跳定时器：防止灵珠平台 SSE 超时断连
+      heartbeatTimer = setInterval(() => {
+        const elapsed = Date.now() - lastDataTime;
+        if (elapsed >= HEARTBEAT_INTERVAL) {
+          try {
+            // 发送 SSE 注释作为心跳（灵珠平台会忽略注释行但保持连接）
+            res.write(": heartbeat\n\n");
+            logger.info(`[Lingzhu] Sent heartbeat (${Math.round(elapsed / 1000)}s since last data)`);
+          } catch {
+            // 连接已关闭，清理定时器
+            clearInterval(heartbeatTimer);
+          }
+        }
+      }, HEARTBEAT_INTERVAL);
 
       // 流式解析 OpenAI SSE
       const reader = openclawResponse.body?.getReader();
@@ -162,6 +198,7 @@ export function createHttpHandler(api: any, getConfig: () => LingzhuConfig) {
         const { done, value } = await reader.read();
         if (done) break;
 
+        lastDataTime = Date.now(); // 更新最后数据时间
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
@@ -198,6 +235,9 @@ export function createHttpHandler(api: any, getConfig: () => LingzhuConfig) {
         }
       }
 
+      // 清理心跳定时器
+      clearInterval(heartbeatTimer);
+
       // 如果没有工具调用，尝试从完整响应中提取 follow_up 建议
       if (!hasToolCall && fullResponse) {
         const suggestions = extractFollowUpFromText(fullResponse);
@@ -217,6 +257,7 @@ export function createHttpHandler(api: any, getConfig: () => LingzhuConfig) {
 
       logger.info(`[Lingzhu] Completed: message_id=${body.message_id}`);
     } catch (error) {
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
       const errorMsg = error instanceof Error ? error.message : String(error);
       logger.error(`[Lingzhu] Error: ${errorMsg}`);
 
